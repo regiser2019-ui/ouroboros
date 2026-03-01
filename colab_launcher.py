@@ -1,5 +1,5 @@
 # ============================
-# Ouroboros — Runtime launcher (entry point, executed from repository)
+# Ouroboros — Runtime launcher (Ubuntu version)
 # ============================
 # Thin orchestrator: secrets, bootstrap, main loop.
 # Heavy logic lives in supervisor/ package.
@@ -7,6 +7,10 @@
 import logging
 import os, sys, json, time, uuid, pathlib, subprocess, datetime, threading, queue as _queue_mod
 from typing import Any, Dict, List, Optional, Set, Tuple
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env файла
+load_dotenv()
 
 log = logging.getLogger(__name__)
 
@@ -15,7 +19,7 @@ log = logging.getLogger(__name__)
 # ----------------------------
 def install_launcher_deps() -> None:
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests"],
+        [sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests", "python-dotenv"],
         check=True,
     )
 
@@ -45,26 +49,30 @@ def ensure_claude_code_cli() -> bool:
 # ----------------------------
 from ouroboros.apply_patch import install as install_apply_patch
 from ouroboros.llm import DEFAULT_LIGHT_MODEL
-install_apply_patch()
+
+# Обработка ошибки прав доступа
+try:
+    install_apply_patch()
+except PermissionError:
+    # Создаем в домашней папке, если нет прав на /usr/local/bin
+    local_bin = pathlib.Path.home() / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+    patch_path = local_bin / "apply_patch"
+    if not patch_path.exists():
+        from ouroboros.apply_patch import APPLY_PATCH_CODE
+        patch_path.write_text(APPLY_PATCH_CODE, encoding="utf-8")
+    print(f"✓ apply_patch installed to {patch_path}")
 
 # ----------------------------
-# 1) Secrets + runtime config
+# 1) Secrets + runtime config (Colab заменен на локальные переменные)
 # ----------------------------
-from google.colab import userdata  # type: ignore
-from google.colab import drive  # type: ignore
 
 _LEGACY_CFG_WARNED: Set[str] = set()
 
-def _userdata_get(name: str) -> Optional[str]:
-    try:
-        return userdata.get(name)
-    except Exception:
-        return None
-
 def get_secret(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
-    v = _userdata_get(name)
+    v = os.environ.get(name)
     if v is None or str(v).strip() == "":
-        v = os.environ.get(name, default)
+        v = default
     if required:
         assert v is not None and str(v).strip() != "", f"Missing required secret: {name}"
     return v
@@ -73,13 +81,6 @@ def get_cfg(name: str, default: Optional[str] = None, allow_legacy_secret: bool 
     v = os.environ.get(name)
     if v is not None and str(v).strip() != "":
         return v
-    if allow_legacy_secret:
-        legacy = _userdata_get(name)
-        if legacy is not None and str(legacy).strip() != "":
-            if name not in _LEGACY_CFG_WARNED:
-                print(f"[cfg] DEPRECATED: move {name} from Colab Secrets to config cell/env.")
-                _LEGACY_CFG_WARNED.add(name)
-            return legacy
     return default
 
 
@@ -95,8 +96,7 @@ TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
 
-# Robust TOTAL_BUDGET parsing — handles \r\n, spaces, and other junk from Colab Secrets
-# Example: user enters "8 800" → Colab stores as "8\r\n800" → we need 8800
+# Robust TOTAL_BUDGET parsing — handles \r\n, spaces, and other junk
 try:
     import re
     _raw_budget = str(TOTAL_BUDGET_DEFAULT or "")
@@ -110,25 +110,25 @@ except Exception as e:
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")
-GITHUB_USER = get_cfg("GITHUB_USER", default=None, allow_legacy_secret=True)
-GITHUB_REPO = get_cfg("GITHUB_REPO", default=None, allow_legacy_secret=True)
-assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your config cell (see README)."
-assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to your config cell (see README)."
-MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
-MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
+GITHUB_USER = get_cfg("GITHUB_USER", default=None)
+GITHUB_REPO = get_cfg("GITHUB_REPO", default=None)
+assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set in .env file."
+assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set in .env file."
+MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5") or "5")
+MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6")
+MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6")
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
-SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
-HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800", allow_legacy_secret=True) or "1800"))
+SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600") or "600"))
+HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800") or "1800"))
 DIAG_HEARTBEAT_SEC = _parse_int_cfg(
-    get_cfg("OUROBOROS_DIAG_HEARTBEAT_SEC", default="30", allow_legacy_secret=True),
+    get_cfg("OUROBOROS_DIAG_HEARTBEAT_SEC", default="30"),
     default=30,
     minimum=0,
 )
 DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
-    get_cfg("OUROBOROS_DIAG_SLOW_CYCLE_SEC", default="20", allow_legacy_secret=True),
+    get_cfg("OUROBOROS_DIAG_SLOW_CYCLE_SEC", default="20"),
     default=20,
     minimum=0,
 )
@@ -150,34 +150,32 @@ if str(ANTHROPIC_API_KEY or "").strip():
     ensure_claude_code_cli()
 
 # ----------------------------
-# 2) Mount Drive
+# 2) Локальная файловая система (вместо Google Drive)
 # ----------------------------
-if not pathlib.Path("/content/drive/MyDrive").exists():
-    drive.mount("/content/drive")
+HOME = pathlib.Path.home()
+DATA_ROOT = HOME / "projects" / "ouroboros_data"
+REPO_DIR = pathlib.Path.cwd()  # текущая папка
 
-DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
-REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
-
+# Создаем структуру папок
 for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
-    (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
-REPO_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_ROOT / sub).mkdir(parents=True, exist_ok=True)
 
 # Clear stale owner mailbox files from previous session
 try:
     from ouroboros.owner_inject import get_pending_path
     # Clean legacy global file
-    _stale_inject = get_pending_path(DRIVE_ROOT)
+    _stale_inject = get_pending_path(DATA_ROOT)
     if _stale_inject.exists():
         _stale_inject.unlink(missing_ok=True)
     # Clean per-task mailbox dir
-    _mailbox_dir = DRIVE_ROOT / "memory" / "owner_mailbox"
+    _mailbox_dir = DATA_ROOT / "memory" / "owner_mailbox"
     if _mailbox_dir.exists():
         for _f in _mailbox_dir.iterdir():
             _f.unlink(missing_ok=True)
 except Exception:
     pass
 
-CHAT_LOG_PATH = DRIVE_ROOT / "logs" / "chat.jsonl"
+CHAT_LOG_PATH = DATA_ROOT / "logs" / "chat.jsonl"
 if not CHAT_LOG_PATH.exists():
     CHAT_LOG_PATH.write_text("", encoding="utf-8")
 
@@ -196,7 +194,7 @@ from supervisor.state import (
     update_budget_from_usage, status_text, rotate_chat_log_if_needed,
     init_state,
 )
-state_init(DRIVE_ROOT, TOTAL_BUDGET_LIMIT)
+state_init(DATA_ROOT, TOTAL_BUDGET_LIMIT)
 init_state()
 
 from supervisor.telegram import (
@@ -204,7 +202,7 @@ from supervisor.telegram import (
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 telegram_init(
-    drive_root=DRIVE_ROOT,
+    drive_root=DATA_ROOT,
     total_budget_limit=TOTAL_BUDGET_LIMIT,
     budget_report_every=BUDGET_REPORT_EVERY_MESSAGES,
     tg_client=TG,
@@ -215,7 +213,7 @@ from supervisor.git_ops import (
     sync_runtime_dependencies, import_test, safe_restart,
 )
 git_ops_init(
-    repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, remote_url=REMOTE_URL,
+    repo_dir=REPO_DIR, drive_root=DATA_ROOT, remote_url=REMOTE_URL,
     branch_dev=BRANCH_DEV, branch_stable=BRANCH_STABLE,
 )
 
@@ -231,7 +229,7 @@ from supervisor.workers import (
     handle_chat_direct, _get_chat_agent, auto_resume_after_restart,
 )
 workers_init(
-    repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, max_workers=MAX_WORKERS,
+    repo_dir=REPO_DIR, drive_root=DATA_ROOT, max_workers=MAX_WORKERS,
     soft_timeout=SOFT_TIMEOUT_SEC, hard_timeout=HARD_TIMEOUT_SEC,
     total_budget_limit=TOTAL_BUDGET_LIMIT,
     branch_dev=BRANCH_DEV, branch_stable=BRANCH_STABLE,
@@ -259,7 +257,7 @@ if restored_pending > 0:
         send_with_budget(int(st_boot["owner_chat_id"]),
                          f"♻️ Restored pending queue from snapshot: {restored_pending} tasks.")
 
-append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+append_jsonl(DATA_ROOT / "logs" / "supervisor.jsonl", {
     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "type": "launcher_start",
     "branch": load_state().get("current_branch"),
@@ -337,7 +335,7 @@ def _get_owner_chat_id() -> Optional[int]:
         return None
 
 _consciousness = BackgroundConsciousness(
-    drive_root=DRIVE_ROOT,
+    drive_root=DATA_ROOT,
     repo_dir=REPO_DIR,
     event_queue=get_event_q(),
     owner_chat_id_fn=_get_owner_chat_id,
@@ -353,7 +351,7 @@ def reset_chat_agent():
 # ----------------------------
 import types
 _event_ctx = types.SimpleNamespace(
-    DRIVE_ROOT=DRIVE_ROOT,
+    DRIVE_ROOT=DATA_ROOT,
     REPO_DIR=REPO_DIR,
     BRANCH_DEV=BRANCH_DEV,
     BRANCH_STABLE=BRANCH_STABLE,
@@ -473,7 +471,7 @@ except Exception as e:
 
 while True:
     loop_started_ts = time.time()
-    rotate_chat_log_if_needed(DRIVE_ROOT)
+    rotate_chat_log_if_needed(DATA_ROOT)
     ensure_workers_healthy()
 
     # Drain worker events
@@ -498,7 +496,7 @@ while True:
         updates = TG.get_updates(offset=offset, timeout=_poll_timeout)
     except Exception as e:
         append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            DATA_ROOT / "logs" / "supervisor.jsonl",
             {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "type": "telegram_poll_error", "offset": offset, "error": repr(e),
@@ -692,7 +690,7 @@ while True:
 
     if DIAG_SLOW_CYCLE_SEC > 0 and loop_duration_sec >= float(DIAG_SLOW_CYCLE_SEC):
         append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            DATA_ROOT / "logs" / "supervisor.jsonl",
             {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "type": "main_loop_slow_cycle",
@@ -706,7 +704,7 @@ while True:
         workers_total = len(WORKERS)
         workers_alive = sum(1 for w in WORKERS.values() if w.proc.is_alive())
         append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            DATA_ROOT / "logs" / "supervisor.jsonl",
             {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "type": "main_loop_heartbeat",
